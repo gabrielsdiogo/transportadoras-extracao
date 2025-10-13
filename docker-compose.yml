@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  transportadoras-api:
+    container_name: transportadoras-api
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "5050:5050"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=America/Sao_Paulo
+    volumes:
+      - ./logs:/app/logs
+    mem_limit: 1g
+    cpus: 1.0
+    command: ["python", "api_transportadoras.py"]
