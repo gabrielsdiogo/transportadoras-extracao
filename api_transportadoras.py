@@ -176,6 +176,7 @@ def executar_script():
         }), 500
 
 
+
 # ========== ENDPOINT: HOME ==========
 @app.route("/", methods=["GET"])
 def home():
