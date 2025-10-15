@@ -2,6 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 import time
 from urllib.parse import urljoin
+import re
 
 BASE = "https://portaldosfretes.com.br"
 
@@ -120,22 +121,54 @@ def extrair_detalhes_transportadora(url_transp):
     soup = BeautifulSoup(resp.text, "html.parser")
     detalhes = {}
 
+    # ---- Telefone ----
     tel_tag = soup.find("a", href=lambda h: h and h.startswith("tel:"))
     if tel_tag:
         detalhes["telefone"] = tel_tag.get_text(strip=True).replace("Telefone:", "").strip()
 
+    # ---- WhatsApp ----
     ws_tag = soup.find("a", href=lambda h: h and ("wa.me" in h or "whatsapp" in h))
     if ws_tag:
         detalhes["whatsapp"] = ws_tag.get("href")
 
-    site_tag = soup.find("a", href=lambda h: h and "http" in h and "portaldosfretes" not in h)
-    if site_tag:
-        detalhes["site"] = site_tag.get("href")
+    # ---- Site ----
+    # XPath: /html/body/div[4]/div/div[1]/div[2]/div/div[2]/div[3]/a
+    site_tag = soup.select_one("div:nth-of-type(3) > a.df-fdr-ac.black.cpt")
+    if not site_tag:
+        # fallback: caso o seletor mude levemente
+        site_tag = soup.find("a", class_="df-fdr-ac black cpt")
+    if site_tag and site_tag.has_attr("href"):
+        detalhes["site"] = site_tag["href"]
 
+    # ---- E-mail protegido por Cloudflare ----
     email_span = soup.select_one("span.__cf_email__")
     if email_span and email_span.has_attr("data-cfemail"):
         detalhes["email"] = decode_cfemail(email_span["data-cfemail"])
 
+    # ---- Imagem (classe img-trans) ----
+    img_div = soup.find("div", class_="img-trans")
+    if img_div and img_div.has_attr("style"):
+        match = re.search(r"url\((.*?)\)", img_div["style"])
+        if match:
+            detalhes["imagem"] = match.group(1)
+
+    # ---- Instagram ----
+    insta_tag = soup.find("a", href=lambda h: h and "instagram.com" in h)
+    if insta_tag:
+        detalhes["instagram"] = insta_tag.get("href")
+
+    # ---- Facebook ----
+    fb_tag = soup.find("a", href=lambda h: h and "facebook.com" in h)
+    if fb_tag:
+        detalhes["facebook"] = fb_tag.get("href")
+
+    # ---- Horário de funcionamento ----
+    p_func = soup.find("p", string=lambda s: s and "Funcionamento" in s)
+    if p_func:
+        texto = p_func.get_text(strip=True)
+        detalhes["horario_funcionamento"] = texto;
+
+    # ---- Campos textuais ----
     for p in soup.find_all("p"):
         txt = p.get_text(strip=True)
         if "Endereço" in txt:
@@ -143,9 +176,13 @@ def extrair_detalhes_transportadora(url_transp):
         if "CNPJ" in txt:
             detalhes["cnpj"] = txt.replace("CNPJ:", "").strip()
         if "Inscrição" in txt or "I.E" in txt:
-            detalhes["inscricao_estadual"] = txt.replace("Inscrição estadual:", "").replace("I.E:", "").strip()
+            detalhes["inscricao_estadual"] = (
+                txt.replace("Inscrição estadual:", "").replace("I.E:", "").strip()
+            )
         if "ANTT" in txt:
-            detalhes["antt"] = txt.replace("Número da ANTT:", "").replace("ANTT:", "").strip()
+            detalhes["antt"] = (
+                txt.replace("Número da ANTT:", "").replace("ANTT:", "").strip()
+            )
 
     return detalhes
 

@@ -72,7 +72,8 @@ def extrair_detalhes_transportadora(emp):
         "email": None,
         "telefone": None,
         "site": None,
-        "whatsapp": None
+        "whatsapp": None,
+        "imagem": None  # novo campo
     }
 
     try:
@@ -129,6 +130,14 @@ def extrair_detalhes_transportadora(emp):
         ws_tag = soup.find("a", href=lambda h: h and ("wa.me" in h or "whatsapp" in h))
         if ws_tag:
             detalhes["whatsapp"] = ws_tag["href"]
+
+        # 🔹 Imagem (novo)
+        img_tag = soup.select_one("#cargasAbout div div div:nth-of-type(2) div img")
+        if not img_tag:
+            # fallback: procura por qualquer <img> dentro da div.company_logo
+            img_tag = soup.select_one("div.company_logo img")
+        if img_tag and img_tag.has_attr("src"):
+            detalhes["imagem"] = urljoin(BASE, img_tag["src"])
 
     except Exception as e:
         print(f"⚠️ Erro em {emp.get('nome', 'desconhecido')}: {e}")
@@ -202,4 +211,3 @@ def executar_pagina(pagina_num):
     time.sleep(0.3)
 
     return list(empresas_map.values())
-

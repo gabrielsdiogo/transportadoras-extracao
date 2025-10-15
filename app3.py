@@ -9,6 +9,8 @@ BASE = "https://www.guiadotransporte.com.br"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 LIMITE_ROTAS = None
 MAX_WORKERS = 10
+session = requests.Session()
+session.headers.update(HEADERS)
 
 # Variável global para armazenar a rota atual
 ROTA_ATUAL = {"origem": None, "destino": None}
@@ -100,65 +102,82 @@ def extrair_detalhes_transportadora(emp):
         "email": None,
         "telefone": None,
         "site": None,
-        "whatsapp": None
+        "whatsapp": None,
+        "imagem": None
     }
 
+    nome_real = emp.get("nome", "")
+    url = emp["link_transportadora"]
+
     try:
-        resp = requests.get(emp["link_transportadora"], headers=HEADERS, timeout=15)
-        if resp.status_code != 200:
+        # -------------------------------
+        # 🔁 Retentativas leves (3x) com tempo curto
+        # -------------------------------
+        for tentativa in range(3):
+            try:
+                resp = session.get(url, timeout=15)
+                if resp.status_code == 200:
+                    break
+            except requests.exceptions.RequestException:
+                if tentativa < 2:
+                    time.sleep(1)
+                    continue
+                return montar_objeto(emp, detalhes)
+        else:
             return montar_objeto(emp, detalhes)
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        html = resp.text
+        soup = BeautifulSoup(html, "lxml")  # parser mais rápido
 
+        # Nome
         nome_tag = soup.select_one("body > section:nth-of-type(1) div div:nth-of-type(1) div h3")
-        nome_real = nome_tag.get_text(strip=True) if nome_tag else emp["nome"]
+        if nome_tag:
+            nome_real = nome_tag.get_text(strip=True)
+
+        # Imagem
+        img_tag = soup.select_one("body > section:nth-of-type(1) div div:nth-of-type(1) > img")
+        if not img_tag:
+            img_tag = soup.find("img", class_=re.compile(r"bg-guiadamudanca|guiadotransporte"))
+        if img_tag and img_tag.has_attr("src"):
+            detalhes["imagem"] = urljoin(BASE, img_tag["src"])
+
+        # Texto completo (para buscar tudo em 1 passagem)
+        texto = soup.get_text(" ", strip=True)
 
         # CNPJ
-        texto_html = soup.get_text(" ", strip=True)
-        m_cnpj = re.search(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}", texto_html)
+        m_cnpj = re.search(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}", texto)
         if m_cnpj:
             detalhes["cnpj"] = m_cnpj.group()
 
-        # Endereço
-        end_tag = soup.select_one("body section div div:nth-of-type(1) div p")
-        if end_tag:
-            detalhes["endereco"] = end_tag.get_text(strip=True)
-
         # Email
-        email_tag = soup.select_one("a[href^='mailto:']")
-        if email_tag:
-            detalhes["email"] = email_tag["href"].replace("mailto:", "").strip()
+        m_email = re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", texto)
+        if m_email:
+            detalhes["email"] = m_email.group()
 
         # Telefone
-        tel_tag = soup.select_one("a[href^='tel:']")
-        if tel_tag:
-            detalhes["telefone"] = tel_tag["href"].replace("tel:", "").strip()
+        m_tel = re.search(r"\(?\d{2}\)?\s?\d{4,5}-?\d{4}", texto)
+        if m_tel:
+            detalhes["telefone"] = m_tel.group()
 
-        # Site
-        site_tag = soup.select_one("a[href^='http']")
-        if site_tag:
-            href_site = site_tag["href"].strip()
-            if "guiadotransporte.com.br" not in href_site:
-                detalhes["site"] = href_site
+        # Endereço (usa heurística simples)
+        end_tag = soup.find("p")
+        if end_tag and "End" in end_tag.get_text():
+            detalhes["endereco"] = end_tag.get_text(strip=True)
+
+        # Site (pega primeiro link externo)
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if href.startswith("http") and "guiadotransporte.com.br" not in href:
+                detalhes["site"] = href
+                break
 
         # WhatsApp
         ws_tag = soup.find("a", href=lambda h: h and "wa.me" in h)
         if ws_tag:
             detalhes["whatsapp"] = ws_tag["href"]
 
-        # Fallbacks
-        texto_completo = soup.get_text(" ", strip=True)
-        if not detalhes["telefone"]:
-            tel_match = re.search(r"\(?\d{2}\)?\s?\d{4,5}-?\d{4}", texto_completo)
-            if tel_match:
-                detalhes["telefone"] = tel_match.group()
-        if not detalhes["email"]:
-            mail_match = re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", texto_completo)
-            if mail_match:
-                detalhes["email"] = mail_match.group()
-
     except Exception as e:
-        print(f"⚠️ Erro em {emp['nome']}: {e}")
+        print(f"⚠️ Erro em {emp.get('nome', 'desconhecido')}: {e}")
 
     return montar_objeto(
         {
@@ -168,6 +187,7 @@ def extrair_detalhes_transportadora(emp):
         },
         detalhes
     )
+
 
 
 # ----------------------------
@@ -213,46 +233,49 @@ def executar_pagina(pagina):
         return {"mensagem": f"Nenhuma rota encontrada na página {pagina}"}
 
     for rota in rotas:
+        print(f"\n🌍 Rota: {rota['origem']} → {rota['destino']}")
         empresas = extrair_transportadoras_da_rota(rota)
         if not empresas:
             continue
 
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(extrair_detalhes_transportadora, emp): emp for emp in empresas}
+        for emp in empresas:
+            print(f"🔎 {emp['nome']}")
+            detalhes_completos = extrair_detalhes_transportadora(emp)
 
-            for future in as_completed(futures):
-                emp = futures[future]
-                try:
-                    detalhes_completos = future.result()
-                    nome_base = emp["nome"].strip()
-                    nome_final = detalhes_completos["nome"].strip()
+            nome_base = emp["nome"].strip()
+            nome_final = detalhes_completos["nome"].strip()
 
-                    if nome_base not in empresas_map:
-                        empresas_map[nome_base] = {
-                            "nome": nome_base,
-                            "rotas": {"origens": [], "destinos": []},
-                            "detalhes": {}
-                        }
+            if nome_base not in empresas_map:
+                empresas_map[nome_base] = {
+                    "nome": nome_base,
+                    "rotas": {"origens": [], "destinos": []},
+                    "detalhes": {}
+                }
 
-                    if emp.get("origem") and emp["origem"] not in empresas_map[nome_base]["rotas"]["origens"]:
-                        empresas_map[nome_base]["rotas"]["origens"].append(emp["origem"])
-                    if emp.get("destino") and emp["destino"] not in empresas_map[nome_base]["rotas"]["destinos"]:
-                        empresas_map[nome_base]["rotas"]["destinos"].append(emp["destino"])
+            # Rotas
+            if emp.get("origem") and emp["origem"] not in empresas_map[nome_base]["rotas"]["origens"]:
+                empresas_map[nome_base]["rotas"]["origens"].append(emp["origem"])
+            if emp.get("destino") and emp["destino"] not in empresas_map[nome_base]["rotas"]["destinos"]:
+                empresas_map[nome_base]["rotas"]["destinos"].append(emp["destino"])
 
-                    if nome_final and nome_final != nome_base:
-                        empresas_map[nome_final] = empresas_map.pop(nome_base)
-                        empresas_map[nome_final]["nome"] = nome_final
-                        nome_base = nome_final
+            # Atualiza nome se necessário
+            if nome_final and nome_final != nome_base:
+                empresas_map[nome_final] = empresas_map.pop(nome_base)
+                empresas_map[nome_final]["nome"] = nome_final
+                nome_base = nome_final
 
-                    empresas_map[nome_base]["detalhes"] = detalhes_completos["detalhes"]
+            empresas_map[nome_base]["detalhes"] = detalhes_completos["detalhes"]
 
-                except Exception as e:
-                    print(f"⚠️ Erro ao processar {emp.get('nome', 'desconhecido')}: {e}")
-
-        time.sleep(0.3)
+            # Delay mínimo para estabilidade, mas quase imperceptível
+            time.sleep(0.2)
 
     for emp in empresas_map.values():
-        emp["rotas"]["origens"] = sorted(list(set(emp["rotas"]["origens"])))
-        emp["rotas"]["destinos"] = sorted(list(set(emp["rotas"]["destinos"])))
+        emp["rotas"]["origens"] = sorted(set(emp["rotas"]["origens"]))
+        emp["rotas"]["destinos"] = sorted(set(emp["rotas"]["destinos"]))
 
     return list(empresas_map.values())
+
+
+if __name__ == "__main__":
+    resultados = executar_pagina(1)
+    print(resultados)
