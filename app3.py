@@ -276,6 +276,3 @@ def executar_pagina(pagina):
     return list(empresas_map.values())
 
 
-if __name__ == "__main__":
-    resultados = executar_pagina(1)
-    print(resultados)
